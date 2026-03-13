@@ -1,0 +1,10 @@
+.env
+*.json
+*.env
+*.env.local
+*.env.development.local
+*.env.test.local
+*.env.production.local
+env/
+node_modules/
+__pycache__/
