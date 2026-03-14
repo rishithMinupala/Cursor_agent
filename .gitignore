@@ -10,3 +10,5 @@ node_modules/
 __pycache__/
 repo/
 docs/
+.vscode/
+.DS_Store
