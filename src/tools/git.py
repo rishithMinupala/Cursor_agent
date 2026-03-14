@@ -37,11 +37,17 @@ def create_branch_impl(state: dict, args: dict) -> str:
         base_sha = client.get_branch_sha(state["repo_owner"], state["repo_name"], base_branch)
         if not base_sha:
             return f"Error: could not get SHA for base branch {base_branch}."
-        ok = client.create_branch(state["repo_owner"], state["repo_name"], full_name, base_sha)
+        ok, err = client.create_branch(state["repo_owner"], state["repo_name"], full_name, base_sha)
         if ok:
             state["current_branch"] = full_name
             return f"Created branch {full_name} (API)."
-        return "Error: failed to create branch via API."
+        ok_local, out = _run(["git", "checkout", "-b", full_name], repo)
+        if ok_local:
+            state["current_branch"] = full_name
+            hint = " 404 usually means token has no write access to this repo; add the token user as collaborator with Write." if "404" in err else ""
+            return f"Created branch {full_name} locally (API failed: {err}).{hint}"
+        hint = " 404: ensure token has write access to the repo (add as collaborator)." if "404" in err else ""
+        return f"Error: API failed ({err}); local checkout failed: {out}.{hint}"
     ok, out = _run(["git", "checkout", "-b", full_name], repo)
     if ok:
         state["current_branch"] = full_name

@@ -171,7 +171,7 @@ TOOLS_FOR_LLM = [
 CODER_TOOL_NAMES = {
     "pull_repo", "grep_search", "read_code", "write_code",
     "create_dir", "create_file", "edit_in_file",
-    "reflect_on_changes", "critique_changes",
+    "critique_changes",
 }
 GIT_TOOL_NAMES = {"create_branch", "commit_changes", "push", "create_pr"}
 

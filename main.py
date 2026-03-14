@@ -14,6 +14,16 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
+def _content_str(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            (c.get("text") if isinstance(c, dict) else str(c)) for c in content
+        ).strip()
+    return str(content) if content else ""
+
+
 def _get_llm(model_name: str | None = None):
     if os.getenv("GEMINI_API_KEY"):
         return ChatGoogleGenerativeAI(
@@ -32,7 +42,7 @@ def main():
     parser = argparse.ArgumentParser(description="PR Agent: natural language task → code changes → PR")
     parser.add_argument("--task", "-t", type=str, required=True, help="Natural language description (include repo URL in task if needed)")
     parser.add_argument("--model", "-m", type=str, default=None, help="Model override (e.g. gemini-2.0-flash, gpt-4o-mini)")
-    parser.add_argument("--max-steps", type=int, default=50, help="Max agent steps (default 50)")
+    parser.add_argument("--max-steps", type=int, default=100, help="Max agent steps (default 50)")
     args = parser.parse_args()
 
     llm = _get_llm(args.model)
@@ -51,7 +61,9 @@ def main():
             if node_name in ("coder", "git_ops") and "messages" in value:
                 last = value["messages"][-1]
                 if hasattr(last, "content") and last.content:
-                    print(f"[{node_name}]", last.content[:500] + ("..." if len(last.content) > 500 else ""))
+                    s = _content_str(last.content)
+                    if s:
+                        print(f"[{node_name}]", s[:500] + ("..." if len(s) > 500 else ""))
             if node_name == "tester" and "tests_ok" in value:
                 print(f"[tester] tests_ok={value.get('tests_ok')}")
             if node_name == "action" and "messages" in value:
@@ -63,8 +75,10 @@ def main():
     if state.values.get("messages"):
         final = state.values["messages"][-1]
         if hasattr(final, "content") and final.content:
-            print("\n--- Final response ---\n")
-            print(final.content)
+            s = _content_str(final.content)
+            if s:
+                print("\n--- Final response ---\n")
+                print(s)
 
 
 if __name__ == "__main__":

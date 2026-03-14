@@ -12,7 +12,7 @@ from src.tools.git import (
     push_impl,
     create_pr_impl,
 )
-from src.tools.reflect import reflect_on_changes_impl, critique_changes_impl
+from src.tools.reflect import critique_changes_impl
 from src.tools.testing import run_tests_impl
 from src.tools.search import grep_search_impl
 
@@ -28,7 +28,6 @@ TOOL_IMPLS = {
     "commit_changes": commit_changes_impl,
     "push": push_impl,
     "create_pr": create_pr_impl,
-    "reflect_on_changes": reflect_on_changes_impl,
     "critique_changes": critique_changes_impl,
     "run_tests": run_tests_impl,
 }

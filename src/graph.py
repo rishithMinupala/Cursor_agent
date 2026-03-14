@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field
 
 from src.config import (
     MAX_TOOL_RESULT_CHARS,
+    MODEL_MAX_RETRIES,
+    MODEL_RETRY_BACKOFF_FACTOR,
+    MODEL_RETRY_INITIAL_DELAY,
     RECENT_MESSAGES_KEEP,
     SUMMARY_TRIGGER_MESSAGES,
     TEST_ENTRY_POINT_TIMEOUT,
@@ -22,7 +25,7 @@ from src.config import (
 )
 from src.state import AgentState
 from src.tools import TOOL_IMPLS
-from src.tools.reflect import critique_changes_impl, reflect_on_changes_impl
+from src.tools.reflect import critique_changes_impl
 from src.tools.schemas import CODER_TOOLS, GIT_TOOLS
 
 logger = logging.getLogger(__name__)
@@ -37,33 +40,60 @@ class TestPlan(BaseModel):
 CODER_PROMPT = """You are a coding agent. Implement the user's feature or bugfix.
 
 Workflow:
-1. Use pull_repo to clone if needed.
-2. Use grep_search to find relevant code, read_code to read files.
-3. For new files: create_dir if needed, then create_file(path, content).
-4. After creating a new file you must integrate it: identify which existing files should use it (e.g. main entrypoint, __init__.py, callers), read_code those files, then use edit_in_file (or write_code) to add imports and wire the new code so the feature actually runs. Do not stop after create_file; integration is required.
-5. For other edits in existing files: use edit_in_file with edit_kind replace (start_line, end_line, content) or insert_after/insert_before (at_line, content). Lines are 1-based. Use write_code only for full-file overwrite.
-6. Use reflect_on_changes and critique_changes before finishing.
-7. When done, respond briefly (e.g. "Done with code changes."). Do not call git tools - the workflow will run tests then git for you."""
+1. pull_repo if needed, then grep_search/read_code only until you know what to change. Do not loop: use each at most once or twice per file.
+2. Apply the fix with write_code or edit_in_file (replace/insert_after/insert_before). Lines are 1-based.
+3. CRITICAL: As soon as you have applied the fix (write_code or edit_in_file), do NOT call grep_search or read_code again. Your next step must be: call critique_changes once, then respond with one short message (e.g. "Done with code changes.") and no tool calls. The workflow will run the code and open a PR.
+4. If critique_changes suggests a real fix (bug/correctness), make that edit and call critique_changes again; then respond "Done with code changes." with no tool calls. Do not re-read or re-grep after the edit.
+5. Do not add test files or test directories. Do not read requirements.txt or other optional files. Do not call git tools."""
 
-GIT_PROMPT = """You are a git/PR agent. Create branch, commit, push, and open a PR for the changes.
+GIT_PROMPT = """You are a git/PR agent. You MUST use tool calls only; do not respond with plain text or a summary.
 
-Use create_branch, commit_changes, push, create_pr. Generate a clear PR title and body from the task context."""
+Call these tools in order (you may call multiple in one response):
+1. create_branch – branch_name from the task (e.g. bugfix/calc-add, feature/xyz).
+2. commit_changes – message: short commit message from the task/summary.
+3. push – no args.
+4. create_pr – title and body from the task context.
+
+Your first response must include at least one tool call (start with create_branch). Do not output a summary or title as text; use the tools."""
 
 TESTER_SYSTEM = """You are a testing agent. Given the conversation (user task, what the coder did) and the list of changed files, decide how to verify the changes.
 
 Rules:
 - If ONLY docs/config were changed (e.g. only .md, .txt, .yml, .yaml, .json, .toml, .env): set run_pytest=false and run_entry_point=false. Critique was already done; no automated test needed.
-- If application code was changed (.py, .js, .ts, etc.): set run_entry_point=true and provide the shell command to run the app from its entry point (e.g. "python -m src.main", "python main.py", "node index.js"). The coder may have indicated the entry point in the conversation; otherwise infer from common patterns (main.py, __main__.py, package.json main, etc.).
-- Set run_pytest=true only if the repo likely has tests and the changes are testable code (e.g. Python under src/ or app/). If there are no tests or only docs changed, set run_pytest=false.
-- entry_point_command must be a single command runnable from the repo root (e.g. "python -m src.main" or "python main.py"). No shell operators like && or |."""
+- If application code was changed (.py, .js, .ts, etc.): set run_entry_point=true and provide the shell command to run the app from its entry point. For Python repos, prefer "python main.py" when main.py exists at repo root; otherwise "python -m src.main" or similar. Do not use "python src/foo.py" as entry point unless that file is the app entry. Use "python main.py" or "node index.js" etc. runnable from repo root.
+- Set run_pytest=true only if the repo clearly has a test suite (e.g. tests/ directory with test files). If unsure or minimal repo, set run_pytest=false.
+- entry_point_command must be a single command runnable from the repo root. No shell operators like && or |."""
 
+
+def _is_transient_model_error(e: Exception) -> bool:
+    if isinstance(e, (ConnectionError, TimeoutError, OSError)):
+        return True
+    name = type(e).__name__
+    return "ProtocolError" in name or "RemoteProtocol" in name or "ConnectError" in name or "ReadTimeout" in name
 
 def create_graph(llm, checkpointer=None):
     coder_model = llm.bind_tools(CODER_TOOLS)
     git_model = llm.bind_tools(GIT_TOOLS)
     tool_impls = dict(TOOL_IMPLS)
-    tool_impls["reflect_on_changes"] = lambda s, a: reflect_on_changes_impl(s, a, llm)
     tool_impls["critique_changes"] = lambda s, a: critique_changes_impl(s, a, llm)
+
+    def invoke_with_retry(model, input, config=None):
+        delay = MODEL_RETRY_INITIAL_DELAY
+        last_exc = None
+        for attempt in range(MODEL_MAX_RETRIES + 1):
+            try:
+                if config is not None:
+                    return model.invoke(input, config)
+                return model.invoke(input)
+            except Exception as e:
+                last_exc = e
+                if not _is_transient_model_error(e) or attempt >= MODEL_MAX_RETRIES:
+                    raise
+                logger.info("model retry after %s (attempt %s)", type(e).__name__, attempt + 1)
+                time.sleep(min(delay, 60))
+                delay *= MODEL_RETRY_BACKOFF_FACTOR
+        if last_exc is not None:
+            raise last_exc
 
     def summarize_node(state: AgentState) -> dict:
         msgs = state.get("messages") or []
@@ -81,11 +111,11 @@ def create_graph(llm, checkpointer=None):
         history_text = "\n".join(lines)
         prompt = (
             "Summarize this coding session for an agent to continue.\n"
-            "Focus on: task, repo, files touched, decisions, errors. Under 200 words.\n\n"
+            "Focus on: task, repo, files touched, decisions. Only mention errors that appear explicitly in the history; do not invent or assume errors. Under 200 words.\n\n"
             f"History:\n{history_text}"
         )
         try:
-            resp = llm.invoke(prompt)
+            resp = invoke_with_retry(llm, prompt)
             summary = (getattr(resp, "content", "") or str(resp))[:1500]
         except Exception:
             summary = "(Summary unavailable)"
@@ -101,7 +131,7 @@ def create_graph(llm, checkpointer=None):
         if state.get("files_changed"):
             system += f"\nFiles changed: {', '.join(state['files_changed'][:8])}"
         full = [SystemMessage(content=system)] + messages
-        response = coder_model.invoke(full)
+        response = invoke_with_retry(coder_model, full)
         return {"messages": [response], "phase": "coding"}
 
     def run_tool_with_retry(name: str, state_dict: dict, args: dict) -> str:
@@ -180,7 +210,7 @@ def create_graph(llm, checkpointer=None):
         context = "\n\n".join(context_parts)
         try:
             structured_llm = llm.with_structured_output(TestPlan)
-            plan = structured_llm.invoke([
+            plan = invoke_with_retry(structured_llm, [
                 SystemMessage(content=TESTER_SYSTEM),
                 HumanMessage(content=f"Decide the test plan.\n\n{context}"),
             ])
@@ -215,20 +245,25 @@ def create_graph(llm, checkpointer=None):
         system = GIT_PROMPT
         if state.get("files_changed"):
             system += f"\nFiles changed: {', '.join(state['files_changed'])}"
+        system += "\nRespond with tool calls only (no plain-text summary)."
         full = [SystemMessage(content=system)] + messages
-        response = git_model.invoke(full)
+        response = invoke_with_retry(git_model, full)
         return {"messages": [response], "phase": "git"}
 
     def coder_has_tools(state: AgentState) -> str:
         last = state["messages"][-1]
-        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-            return "action"
+        if isinstance(last, AIMessage):
+            tc = getattr(last, "tool_calls", None)
+            if tc and len(tc) > 0:
+                return "action"
         return "tester"
 
     def git_has_tools(state: AgentState) -> str:
         last = state["messages"][-1]
-        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-            return "action"
+        if isinstance(last, AIMessage):
+            tc = getattr(last, "tool_calls", None)
+            if tc and len(tc) > 0:
+                return "action"
         return "end"
 
     def route_after_action(state: AgentState) -> str:
