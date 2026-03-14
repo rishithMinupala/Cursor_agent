@@ -6,7 +6,7 @@ import logging
 from dotenv import load_dotenv
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage
-
+from langchain_google_genai import ChatGoogleGenerativeAI
 from src import create_graph
 from src.state import AgentState
 
@@ -16,7 +16,6 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 def _get_llm(model_name: str | None = None):
     if os.getenv("GEMINI_API_KEY"):
-        from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
             model=model_name or "gemini-3-flash-preview",
             temperature=0,
