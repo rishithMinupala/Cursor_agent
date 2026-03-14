@@ -185,7 +185,7 @@ def create_graph(llm, checkpointer=None):
                 HumanMessage(content=f"Decide the test plan.\n\n{context}"),
             ])
         except Exception:
-            plan = TestPlan(run_pytest=bool(files_changed), run_entry_point=bool(files_changed), entry_point_command="python -m src.main" if files_changed else None, reason="fallback")
+            plan = TestPlan(run_pytest=False, run_entry_point=bool(files_changed), entry_point_command="python main.py" if files_changed else None, reason="fallback")
         logger.info("phase=tester pytest=%s entry=%s cmd=%s", plan.run_pytest, plan.run_entry_point, plan.entry_point_command or "")
         if not plan.run_pytest and not plan.run_entry_point:
             return {"tests_ok": True, "test_output": "(No automated tests; critique-only.)", "phase": "git"}
