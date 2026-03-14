@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 import os
 import argparse
+import logging
 
 from dotenv import load_dotenv
 from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import HumanMessage
 
 from src import create_graph
 from src.state import AgentState
-from langchain_core.messages import HumanMessage
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 def _get_llm(model_name: str | None = None):
@@ -40,7 +42,6 @@ def main():
 
     initial: AgentState = {
         "messages": [HumanMessage(content=args.task)],
-        "working_summary": args.task[:200],
     }
 
     for step, chunk in enumerate(graph.stream(initial, config)):
@@ -48,10 +49,12 @@ def main():
             print("\n[Max steps reached]")
             break
         for node_name, value in chunk.items():
-            if node_name == "agent" and "messages" in value:
+            if node_name in ("coder", "git_ops") and "messages" in value:
                 last = value["messages"][-1]
                 if hasattr(last, "content") and last.content:
-                    print(last.content[:500] + ("..." if len(last.content) > 500 else ""))
+                    print(f"[{node_name}]", last.content[:500] + ("..." if len(last.content) > 500 else ""))
+            if node_name == "tester" and "tests_ok" in value:
+                print(f"[tester] tests_ok={value.get('tests_ok')}")
             if node_name == "action" and "messages" in value:
                 for m in value["messages"]:
                     if hasattr(m, "name"):
